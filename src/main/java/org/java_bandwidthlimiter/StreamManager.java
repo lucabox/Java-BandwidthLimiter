@@ -57,6 +57,7 @@ public class StreamManager implements BandwidthLimiter {
     //helper class to parameters for a stream direction (upstream or downstream)
     private class StreamParams {
         public long maxBps;
+        public long adjustedMaxBps; //just a placeholder so we don't have to do maxBps*actualPayloadPercentage all the time
         public long remainingBps;
         public long nextResetTimestamp;
         public long nextResetSubIntervals;
@@ -65,16 +66,16 @@ public class StreamManager implements BandwidthLimiter {
             return nextResetTimestamp - System.currentTimeMillis();
         }
         private void reset() {
-            remainingBps = maxBps / nextResetSubIntervals;
+            remainingBps = adjustedMaxBps / nextResetSubIntervals;
             nextResetTimestamp = System.currentTimeMillis() + (OneSecond /nextResetSubIntervals);
         }
         private void adjustBytes(long bytesNumber) {
             //make sure that this adjustment didn't go over the max allowed
-            remainingBps = Math.min(remainingBps + bytesNumber, maxBps / nextResetSubIntervals );
+            remainingBps = Math.min(remainingBps + bytesNumber, adjustedMaxBps / nextResetSubIntervals );
         }
     }
 
-    //we allow 10% as overhead (this can be fine tuned via setPayloadPercentage)
+    //allow 5% as overhead (this can be fine tuned via setPayloadPercentage)
     private double actualPayloadPercentage = 0.95;
     private boolean enabled = false;
 
@@ -103,6 +104,10 @@ public class StreamManager implements BandwidthLimiter {
      */
     public StreamManager(long maxBitsPerSecond) {
         setMaxBitsPerSecondThreshold( maxBitsPerSecond );
+        setDownstreamKbps(maxBitsPerSecond / 1000);
+        setUpstreamKbps(maxBitsPerSecond / 1000);
+        setPayloadPercentage(95);
+        disable();
     }
 
 
@@ -130,7 +135,6 @@ public class StreamManager implements BandwidthLimiter {
     @Override
     public void setDownstreamKbps(long downstreamKbps) {
         long bytesPerSecond = (downstreamKbps * 1000) / 8;
-        bytesPerSecond = (long) (bytesPerSecond * actualPayloadPercentage);
         setMaxBps(this.downStream, bytesPerSecond);
     }
     /**
@@ -141,7 +145,6 @@ public class StreamManager implements BandwidthLimiter {
     @Override
     public void setUpstreamKbps(long upstreamKbps) {
         long bytesPerSecond = (upstreamKbps * 1000) / 8;
-        bytesPerSecond = (long) (bytesPerSecond * actualPayloadPercentage);
         setMaxBps(this.upStream, bytesPerSecond);
     }
     /**
@@ -160,15 +163,16 @@ public class StreamManager implements BandwidthLimiter {
      *                          downstream/upstream bandwidth will be full used for
      *                          sending payload.
      *                          Default value is 95%.
-     *                          This value is applied also if an out of boundaries value is passed in.
+     *                          The default value is applied if an out of boundaries value is passed in.
      */
-    public void setPayloadPercentage(double payloadPercentage) {
-        payloadPercentage /= 100;
-        if( !(payloadPercentage > 0 && payloadPercentage <= 1) ) {
+    public void setPayloadPercentage(int payloadPercentage) {
+        if( !(payloadPercentage > 0 && payloadPercentage <= 100) ) {
             //if an invalid percentage is given
-            payloadPercentage = 0.95;
+            payloadPercentage = 95;
         }
-        this.actualPayloadPercentage = payloadPercentage;
+        this.actualPayloadPercentage = (double) payloadPercentage/100;
+        setMaxBps(this.downStream, this.downStream.maxBps);
+        setMaxBps(this.upStream, this.upStream.maxBps);
     }
 
     /**
@@ -205,16 +209,17 @@ public class StreamManager implements BandwidthLimiter {
         //we can send EVER in upstream/downstream
         //the user can later decrease this value but not increment it
         this.maxBytesPerSecond = maxBitsPerSecond/8;
-        this.maxBytesPerSecond = (long) (this.maxBytesPerSecond * actualPayloadPercentage);
-        setDownstreamKbps(maxBitsPerSecond / 1000);
-        setUpstreamKbps(maxBitsPerSecond / 1000);
+        //make sure the streams parameters honor the new max limit
+        setMaxBps(this.downStream, this.downStream.maxBps);
+        setMaxBps(this.upStream, this.upStream.maxBps);
     }
 
     private void setMaxBps( StreamParams direction, long maxBps ) {
         synchronized (direction) {
             //accept the desired maxBps only if it's less or equal than
-            //the maximum allowed (previously set via setMaxBitsPerSecondThreshold
+            //the maximum allowed (previously set via setMaxBitsPerSecondThreshold)
             direction.maxBps = Math.min( this.maxBytesPerSecond, maxBps);
+            direction.adjustedMaxBps = (long) (direction.maxBps * actualPayloadPercentage);
             direction.nextResetSubIntervals = 2;
             direction.reset();
         }
@@ -291,7 +296,7 @@ public class StreamManager implements BandwidthLimiter {
                 //happened more than the latency itself ago.
                 long latency = (start - stream.getLastActivity()) > this.latency ? this.latency : 0;
                 // sleep for the amount of time it should have taken to read the amount of bytes read
-                StreamManager.simulate(this.downStream.maxBps, latency, bytesRead, end - start, stream.getRoundUp());
+                StreamManager.simulate(this.downStream.adjustedMaxBps, latency, bytesRead, end - start, stream.getRoundUp());
                 return bytesRead;
             } else {
                 long sleepTime = timeToNextReset(this.downStream);
@@ -341,7 +346,7 @@ public class StreamManager implements BandwidthLimiter {
 
             //sleep for the amount of time it should have taken to write the amount of bytes written
             long latency = (start - stream.getLastActivity()) > this.latency ? this.latency : 0;
-            StreamManager.simulate(this.upStream.maxBps, latency, bytesWritten, end - start, stream.getRoundUp());
+            StreamManager.simulate(this.upStream.adjustedMaxBps, latency, bytesWritten, end - start, stream.getRoundUp());
         }
     }
 
